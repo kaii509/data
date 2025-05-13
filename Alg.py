@@ -1,63 +1,99 @@
-from datetime import datetime
-import matplotlib.pyplot as plt
-import pandas as pd
-from pandas.plotting import register_matplotlib_converters
-register_matplotlib_converters()
 import MetaTrader5 as mt5
- 
-# connect to MetaTrader 5
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+# Connect to MetaTrader 5
 if not mt5.initialize():
-    print("initialize() failed")
+    print("initialize() failed, error code:", mt5.last_error())
+    quit()
+
+account_info = mt5.account_info()
+if account_info is None:
+    print("Failed to get account info")
     mt5.shutdown()
- 
-# request connection status and parameters
-print(mt5.terminal_info())
-# get data on MetaTrader 5 version
-print(mt5.version())
- 
-# request 1000 ticks from EURAUD
-euraud_ticks = mt5.copy_ticks_from("EURAUD", datetime(2020,1,28,13), 1000, mt5.COPY_TICKS_ALL)
-# request ticks from AUDUSD within 2019.04.01 13:00 - 2019.04.02 13:00
-audusd_ticks = mt5.copy_ticks_range("AUDUSD", datetime(2020,1,27,13), datetime(2020,1,28,13), mt5.COPY_TICKS_ALL)
- 
-# get bars from different symbols in a number of ways
-eurusd_rates = mt5.copy_rates_from("EURUSD", mt5.TIMEFRAME_M1, datetime(2020,1,28,13), 1000)
-eurgbp_rates = mt5.copy_rates_from_pos("EURGBP", mt5.TIMEFRAME_M1, 0, 1000)
-eurcad_rates = mt5.copy_rates_range("EURCAD", mt5.TIMEFRAME_M1, datetime(2020,1,27,13), datetime(2020,1,28,13))
- 
-# shut down connection to MetaTrader 5
-mt5.shutdown()
- 
-#DATA
-print('euraud_ticks(', len(euraud_ticks), ')')
-for val in euraud_ticks[:10]: print(val)
- 
-print('audusd_ticks(', len(audusd_ticks), ')')
-for val in audusd_ticks[:10]: print(val)
- 
-print('eurusd_rates(', len(eurusd_rates), ')')
-for val in eurusd_rates[:10]: print(val)
- 
-print('eurgbp_rates(', len(eurgbp_rates), ')')
-for val in eurgbp_rates[:10]: print(val)
- 
-print('eurcad_rates(', len(eurcad_rates), ')')
-for val in eurcad_rates[:10]: print(val)
- 
-#PLOT
-# create DataFrame out of the obtained data
-ticks_frame = pd.DataFrame(euraud_ticks)
-# convert time in seconds into the datetime format
-ticks_frame['time']=pd.to_datetime(ticks_frame['time'], unit='s')
-# display ticks on the chart
-plt.plot(ticks_frame['time'], ticks_frame['ask'], 'r-', label='ask')
-plt.plot(ticks_frame['time'], ticks_frame['bid'], 'b-', label='bid')
- 
-# display the legends
-plt.legend(loc='upper left')
- 
-# add the header
-plt.title('EURAUD ticks')
- 
-# display the chart
+    quit()
+
+print(f"Connected to account: {account_info.login}, Balance: {account_info.balance}")
+
+# Define time range
+from_date = datetime(2023, 1, 1)
+to_date = datetime.now()
+
+# Pull symbol history (executed entries/exits)
+deals = mt5.history_deals_get(from_date, to_date)
+if deals is None or len(deals) == 0:
+    print("No deals found.")
+    mt5.shutdown()
+    quit()
+else:
+    traded_sym = list(set([deal.symbol for deal in deals]))
+    print("Traded Symbols:", traded_sym)
+
+
+# Convert to DataFrame
+df = pd.DataFrame(list(deals), columns=deals[0]._asdict().keys())
+df = df[df['type'].isin([mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL])]
+df['time'] = pd.to_datetime(df['time'], unit='s')
+df['profit'] = df['profit'].astype(float)
+
+
+
+# Group by position_id — each group = 1 trade
+if 'position_id' in df.columns:
+    group_field = 'position_id'
+else:
+    group_field = 'position'  # fallback
+
+trades = df.groupby(group_field).agg({
+    'time': 'min',
+    'symbol': 'first',
+    'profit': 'sum'
+}).reset_index()
+
+# Sort by time
+trades = trades.sort_values('time')
+trades['win'] = (trades['profit'] > 0).astype(int)
+trades['loss'] = (trades['profit'] <= 0).astype(int)
+trades['cumulative_wins'] = trades['win'].cumsum()
+trades['cumulative_losses'] = trades['loss'].cumsum()
+trades['cumulative_profit'] = trades['profit'].cumsum()
+
+# Summary
+total_trades = len(trades)
+wins = trades['win'].sum()
+losses = trades['loss'].sum()
+winrate = (wins / total_trades) * 100 if total_trades > 0 else 0
+
+print(f"\nCompleted Trades: {total_trades}")
+print(f"Wins: {wins}")
+print(f"Losses: {losses}")
+print(f"Winrate: {winrate:.2f}%")
+
+# Plot cumulative win/loss
+plt.figure(figsize=(10, 5))
+plt.plot(trades['time'], trades['cumulative_wins'], label='Wins', marker='o')
+plt.plot(trades['time'], trades['cumulative_losses'], label='Losses', linestyle='--', marker='x')
+plt.title(f"Cumulative Wins vs Losses Over Time\nWinrate: {winrate:.2f}%")
+plt.xlabel("Date")
+plt.ylabel("Number of Trades")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
 plt.show()
+
+# Plot cumulative profit
+plt.figure(figsize=(10, 5))
+plt.plot(trades['time'], trades['cumulative_profit'], marker='o')
+plt.title("Cumulative Profit Over Time")
+plt.xlabel("Date")
+plt.ylabel("Profit ($)")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Optional: Save to CSV
+trades.to_csv("mt5_trades.csv", index=False)
+
+# Shutdown
+mt5.shutdown()
